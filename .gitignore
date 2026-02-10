@@ -1,0 +1,8 @@
+.env
+library/
+postgres/
+immich-go
+**/__pycache__/
+**/.DS_Store
+ionos_multimodal_indexing/venv/
+ionos_multimodal_indexing/logs/
