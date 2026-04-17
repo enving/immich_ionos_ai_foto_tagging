@@ -37,6 +37,23 @@ This file documents a real recovery performed on 2026-03-11 (Europe/Berlin) afte
 - **Restore “false deletions”:** reverted the mass-deletion performed at 2026-03-11 00:00 UTC by setting `asset.deletedAt = NULL` for that date.
 - **Clear offline flag:** set `asset.isOffline=false` for active external library assets.
 
+## External DB Access (for indexing scripts)
+
+The Python indexing scripts run **outside** Docker and need to connect to the database directly.
+
+**Required:** Expose PostgreSQL port in `docker-compose.yml`:
+
+```yaml
+immich_postgres:
+  ports:
+    - "5432:5432"
+```
+
+Without this, you'll get:
+```
+connection to server at "localhost", port 5432 failed: Connection refused
+```
+
 ## Fast Checks (When Something Breaks Again)
 
 ### 1) Does the API listen?
