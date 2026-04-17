@@ -1,6 +1,8 @@
 #!/bin/bash
 set -e
 
+source ./.env
+
 echo "=== Step 1: Checking imported directory ==="
 if [ -d "./library/imported" ]; then
   echo "✓ ./library/imported exists with contents:"
@@ -18,7 +20,7 @@ docker compose up -d --wait
 echo ""
 echo "=== Step 3: Logging in ==="
 curl -s -c /tmp/cookies.txt -H "Content-Type: application/json" \
-  -d '{"email":"tristan.haefele@proton.me","password":"KlausMaus2026!"}' \
+  -d "{\"email\":\"$IMMICH_USER_EMAIL\",\"password\":\"$IMMICH_USER_PASSWORD\"}" \
   http://localhost:2283/api/auth/login
 
 if [ ! -f /tmp/cookies.txt ]; then

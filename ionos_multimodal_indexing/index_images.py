@@ -1,3 +1,6 @@
+
+
+
 #!/usr/bin/env python3
 """
 Skript zur Indizierung von Bildern mit dem IONOS-Multimodal-Modell.
@@ -17,7 +20,9 @@ import psycopg2
 from psycopg2 import sql
 from PIL import Image
 import io
+import hashlib
 from progress_tracker import ProgressTracker
+
 
 # Lade Umgebungsvariablen aus der .env-Datei
 load_dotenv()
@@ -33,14 +38,66 @@ DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_DATABASE_NAME = os.getenv("DB_DATABASE_NAME")
 DB_DATA_LOCATION = os.getenv("DB_DATA_LOCATION")
 
-# Verzeichnis mit den Bildern
-UPLOAD_LOCATION = os.getenv("UPLOAD_LOCATION", "/Users/macenving/immich-server/library/imported")
-IMAGE_DIR = UPLOAD_LOCATION
+# Verzeichnis mit den Bildern (unabhängig von UPLOAD_LOCATION, da Immich System-Daten separat liegen)
+IMAGE_DIR = os.getenv("IMAGE_DIR", "/Users/macenving/immich-server/library/imported")
 
 # Konfiguration für die Batch-Verarbeitung
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))
 RATE_LIMIT_DELAY = float(os.getenv("RATE_LIMIT_DELAY", "1.0"))  # Sekunden zwischen Batches
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
+
+def get_file_checksum(file_path):
+    """Berechnet den SHA1-Hash einer Datei (wie von Immich verwendet)."""
+    sha1 = hashlib.sha1()
+    try:
+        with open(file_path, 'rb') as f:
+            while True:
+                data = f.read(8192)
+                if not data:
+                    break
+                sha1.update(data)
+        return sha1.hexdigest()
+    except Exception as e:
+        print(f"Fehler beim Berechnen des Checksums für {file_path}: {e}")
+        return None
+
+def get_asset_id_from_database(image_path):
+    """Finde die Asset-ID für ein Bild in der Immich-Datenbank mittels Dateipfad."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+
+        cursor = conn.cursor()
+
+        # Konvertiere Host-Pfad zu Container-Pfad
+        # Host: /Users/macenving/immich-server/library/imported/... -> Container: /imported/...
+        host_prefix = "/Users/macenving/immich-server/library/imported/"
+        container_prefix = "/imported/"
+        
+        str_path = str(image_path)
+        if str_path.startswith(host_prefix):
+            container_path = container_prefix + str_path[len(host_prefix):]
+        else:
+            # Fallback: versuche den Pfad direkt
+            container_path = str_path
+
+        query = sql.SQL("""
+            SELECT id FROM asset
+            WHERE "originalPath" = %s
+            LIMIT 1
+        """)
+
+        cursor.execute(query, (container_path,))
+        result = cursor.fetchone()
+
+        cursor.close()
+        conn.close()
+
+        return result[0] if result else None
+    except Exception as e:
+        print(f"Fehler beim Abrufen der Asset-ID für {image_path}: {e}")
+        return None
 
 def get_db_connection():
     """Stellt eine Verbindung zur Immich-Datenbank her."""
@@ -220,7 +277,8 @@ def send_image_to_ionos_api(image_path, retry_count=0):
         response = requests.post(
             f"{IONOS_API_URL}/chat/completions",
             headers=headers,
-            json=payload
+            json=payload,
+            timeout=60
         )
 
         if response.status_code == 200:
@@ -244,83 +302,103 @@ def send_image_to_ionos_api(image_path, retry_count=0):
             print(f"Maximale Anzahl von Versuchen erreicht für {image_path}: {e}")
             return None
 
-def get_asset_id_from_database(image_path):
-    """Finde die Asset-ID für ein Bild in der Immich-Datenbank."""
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return None
-
-        cursor = conn.cursor()
-
-        # Extrahiere den Dateinamen aus dem Pfad
-        relative_path = str(image_path).replace(UPLOAD_LOCATION, "")
-        if relative_path.startswith("/"):
-            relative_path = relative_path[1:]
-
-        # Suche nach dem Asset in der Datenbank
-        query = sql.SQL("""
-            SELECT id FROM assets
-            WHERE file_path = %s
-            ORDER BY created_at DESC
-            LIMIT 1
-        """)
-
-        cursor.execute(query, (relative_path,))
-        result = cursor.fetchone()
-
-        cursor.close()
-        conn.close()
-
-        return result[0] if result else None
-    except Exception as e:
-        print(f"Fehler beim Abrufen der Asset-ID für {image_path}: {e}")
-        return None
 
 def save_results_to_database(image_path, api_response):
     """Speichert die Ergebnisse der API-Antwort in der Immich-Datenbank."""
     try:
+        # Extrahiere den Textinhalt der API-Antwort
+        content = api_response.get("choices", [{}])[0].get("message", {}).get("content", "")
+        
+        # Versuche, den Inhalt als JSON zu parsen
+        structured_data = None
+        description_text = content
+        tags = []
+        
+        try:
+            # Manchmal schickt die API Markdown-Blöcke (z.B. ```json ... ```)
+            if "```json" in content:
+                json_part = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                json_part = content.split("```")[1].split("```")[0].strip()
+            else:
+                json_part = content.strip()
+                
+            structured_data = json.loads(json_part)
+            description_text = structured_data.get("description", content)
+            tags = structured_data.get("tags", [])
+            
+            # Stelle sicher, dass tags eine Liste von Strings ist
+            if isinstance(tags, list):
+                tags = [str(t) for t in tags if t]
+            else:
+                tags = []
+                
+        except Exception as e:
+            print(f"   ⚠️  JSON-Parse-Warnung für {os.path.basename(str(image_path))}: {e}")
+            # Fallback: speichere den Rohtext als structured_data
+            structured_data = {"raw_response": content}
+
+        # Finde die Asset-ID für das Bild in der Datenbank (mittels Checksum)
+        asset_id = get_asset_id_from_database(image_path)
+        if not asset_id:
+            print(f"   ⚠️  Keine Asset-ID für {os.path.basename(str(image_path))} (nicht in Immich?)")
+            return False
+
         conn = get_db_connection()
         if not conn:
             return False
 
         cursor = conn.cursor()
 
-        # Extrahiere relevante Informationen aus der API-Antwort
-        description = api_response.get("choices", [{}])[0].get("message", {}).get("content", "")
+        # 1. Speichere die volle strukturierte Antwort in asset_metadata (JSONB)
+        #    Hier landen ALLE Daten: objects, people, faces, scene, location, colors, tags, description
+        if structured_data:
+            metadata_query = sql.SQL("""
+                INSERT INTO asset_metadata ("assetId", key, value)
+                VALUES (%s, %s, %s::jsonb)
+                ON CONFLICT ("assetId", key)
+                DO UPDATE SET
+                    value = EXCLUDED.value
+            """)
+            cursor.execute(metadata_query, (
+                asset_id,
+                'ionos_analysis',
+                json.dumps(structured_data, ensure_ascii=False)
+            ))
 
-        # Finde die Asset-ID für das Bild in der Datenbank
-        asset_id = get_asset_id_from_database(image_path)
-        if not asset_id:
-            print(f"Keine Asset-ID gefunden für {image_path}")
-            cursor.close()
-            conn.close()
-            return False
-
-        # Speichere die Metadaten in der Datenbank
-        query = sql.SQL("""
-            INSERT INTO asset_metadata (asset_id, description, tags)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (asset_id)
-            DO UPDATE SET
-                description = EXCLUDED.description,
-                tags = EXCLUDED.tags
+        # 2. Speichere description + tags in asset_exif (für Immich-Suche)
+        exif_query = sql.SQL("""
+            UPDATE asset_exif
+            SET description = %s,
+                tags = %s
+            WHERE "assetId" = %s
         """)
-
-        # Extrahiere Tags aus der Beschreibung (einfache Implementierung)
-        tags = []
-        if "Tags:" in description:
-            tags_part = description.split("Tags:")[1].strip()
-            tags = [tag.strip() for tag in tags_part.split(",") if tag.strip()]
-
-        cursor.execute(query, (asset_id, description, tags))
+        cursor.execute(exif_query, (description_text, tags, asset_id))
 
         conn.commit()
         cursor.close()
         conn.close()
         return True
     except Exception as e:
-        print(f"Fehler beim Speichern der Ergebnisse für {image_path}: {e}")
+        print(f"   ❌ DB-Fehler für {os.path.basename(str(image_path))}: {e}")
+        return False
+
+
+def is_asset_indexed(asset_id):
+    """Prüft, ob für ein Asset bereits eine IONOS-Analyse in der Datenbank vorliegt."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+        cursor = conn.cursor()
+        query = sql.SQL("SELECT 1 FROM asset_metadata WHERE \"assetId\" = %s AND key = 'ionos_analysis'")
+        cursor.execute(query, (asset_id,))
+        exists = cursor.fetchone() is not None
+        cursor.close()
+        conn.close()
+        return exists
+    except Exception as e:
+        print(f"Fehler beim Prüfen des Index-Status für {asset_id}: {e}")
         return False
 
 def process_images():
@@ -342,6 +420,7 @@ def process_images():
         # Starte die Verarbeitung mit Fortschrittsverfolgung
         tracker.start_processing(total_images)
 
+
         # Batch-Verarbeitung
         for i in range(0, len(image_files), BATCH_SIZE):
             batch = image_files[i:i + BATCH_SIZE]
@@ -355,6 +434,12 @@ def process_images():
                     continue
 
                 print(f"   🔄 Bild {j}/{len(batch)}: {os.path.basename(image_path)}")
+
+                # WICHTIG: Prüfen, ob Asset-ID existiert (bevor wir die teure API rufen)
+                asset_id = get_asset_id_from_database(image_path)
+                if not asset_id:
+                     print(f"   ⏭️  Bild {j}/{len(batch)}: {os.path.basename(image_path)} - noch nicht in Immich (warte auf Import)")
+                     continue
 
                 # Sende das Bild an die IONOS-API
                 api_response = send_image_to_ionos_api(image_path)

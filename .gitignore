@@ -6,3 +6,7 @@ immich-go
 **/.DS_Store
 ionos_multimodal_indexing/venv/
 ionos_multimodal_indexing/logs/
+ionos_multimodal_indexing/nohup.out
+*.bak
+*.pyc
+.env.*

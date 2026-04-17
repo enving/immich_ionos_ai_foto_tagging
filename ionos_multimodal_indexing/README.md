@@ -1,79 +1,80 @@
-# IONOS Multimodal Image Indexing
+# Ionos Multimodal Indexer für Immich
 
-Dieses Skript ermöglicht die Indizierung von Bildern mit dem IONOS-Multimodal-Modell (mistral-small-24b) und speichert die Ergebnisse in der Immich-Datenbank.
+Dieses Projekt erweitert Immich um eine leistungsstarke, KI-gestützte Bildanalyse mittels der **IONOS Multimodal API** (basierend auf Mistral). Es analysiert importierte Bilder und speichert detaillierte Metadaten (Objekte, Personen, Szenen, Farben) direkt in der Immich-Datenbank, wodurch diese durchsuchbar werden.
 
 ## Funktionen
 
-- **Multimodale Bildanalyse**: Nutzt das IONOS mistral-small-24b Modell für detaillierte Bildbeschreibungen und Tagging
-- **Batch-Verarbeitung**: Verarbeitet Bilder in konfigurierbaren Batches mit Rate Limiting
-- **Fehlerbehandlung**: Automatische Wiederholung bei API-Fehlern mit exponentiellem Backoff
-- **Datenbankintegration**: Speichert Ergebnisse direkt in der Immich-Datenbank
+- **Automatische Indexierung:** Scannet Bilder im Import-Verzeichnis (`library/imported`).
+- **Multimodale Analyse:** Nutzt modernste KI, um Bildinhalte zu verstehen.
+- **Datenbank-Integration:** Speichert Ergebnisse direkt in PostgreSQL (`asset_metadata` und `asset_exif`).
+- **Idempotenz:** Prüft vor jeder API-Anfrage, ob das Bild bereits analysiert wurde (spart Kosten und Zeit).
+- **Automatisierung:** Kann per Cronjob regelmäßig laufen.
 
-## Voraussetzungen
+## Einrichtung
 
-- Python 3.8+
-- Installierte Abhängigkeiten: `requests`, `python-dotenv`, `psycopg2-binary`, `Pillow`
-- Konfigurierte `.env`-Datei mit IONOS-API-Zugangsdaten
-- Laufende Immich-Instanz mit PostgreSQL-Datenbank
+### 1. Voraussetzungen
 
-## Installation
+- Eine laufende Immich-Instanz.
+- Ein IONOS Cloud Account mit API-Key für die AI Model Hub.
+- Python 3 installiert.
+
+### 2. Konfiguration
+
+Die Konfiguration erfolgt über die `.env` Datei im Hauptverzeichnis (`../.env`). Folgende Variablen müssen gesetzt sein:
 
 ```bash
-pip install requests python-dotenv psycopg2-binary Pillow
-```
-
-## Konfiguration
-
-Erstelle oder bearbeite die `.env`-Datei mit folgenden Variablen:
-
-```env
-# IONOS API Konfiguration
 IONOS_API_KEY=dein_api_key
 IONOS_API_URL=https://openai.inference.de-txl.ionos.com/v1
 IONOS_MODEL=mistralai/Mistral-Small-24B-Instruct
-
-# Immich Datenbank Konfiguration
 DB_USERNAME=postgres
 DB_PASSWORD=dein_db_passwort
 DB_DATABASE_NAME=immich
-
-# Verarbeitungsoptionen (optional)
-UPLOAD_LOCATION=./library/imported
-BATCH_SIZE=10
-RATE_LIMIT_DELAY=1.0
-MAX_RETRIES=3
 ```
 
-## Verwendung
+### 3. Installation
 
-### Alle Bilder indizieren
+Abhängigkeiten installieren:
 
 ```bash
-python index_images.py
+pip3 install requests psycopg2-binary python-dotenv Pillow
 ```
 
-### Einzelnes Bild testen
+## Nutzung
+
+### Manuelle Ausführung
+
+Um den Indexierungsvorgang einmalig manuell zu starten:
 
 ```bash
-python test_ionos_api.py
+cd ionos_multimodal_indexing
+python3 index_images.py
 ```
 
-## Datenbankstruktur
+Das Skript zeigt einen Fortschrittsbalken und Statistiken an.
 
-Das Skript speichert die Ergebnisse in der `asset_metadata`-Tabelle:
+### Automatische Ausführung (Cronjob)
 
-- `asset_id`: Verweis auf das Asset in der Immich-Datenbank
-- `description`: Detaillierte Bildbeschreibung vom IONOS-Modell
-- `tags`: Extrahiere Tags aus der Beschreibung
+Für eine regelmäßige Überprüfung (z.B. stündlich) gibt es ein Wrapper-Skript `run_indexing.sh`.
 
-## Fehlerbehebung
+Einrichtung via `crontab -e`:
 
-- **Datenbankverbindung fehlgeschlagen**: Überprüfe die Datenbankkonfiguration in `.env`
-- **API-Fehler**: Überprüfe den IONOS_API_KEY und die Netzwerkverbindung
-- **Bilder nicht gefunden**: Überprüfe den `UPLOAD_LOCATION`-Pfad
+```bash
+# Läuft jede volle Stunde
+0 * * * * /Users/macenving/immich-server/ionos_multimodal_indexing/run_indexing.sh
+```
 
-## Sicherheitshinweise
+Logs werden in `ionos_multimodal_indexing/logs/cron_run.log` gespeichert.
 
-- Bewahre den IONOS_API_KEY sicher auf und teile ihn nicht
-- Das Skript verwendet HTTPS für die API-Kommunikation
-- Die Datenbankverbindung ist lokal auf Port 5432 konfiguriert
+## Funktionsweise
+
+1.  **Suche:** Das Skript sucht rekursiv nach Bildern in `library/imported`.
+2.  **Filterung:** Es prüft anhand des Datei-Hashs (Checksum) in der Immich-Datenbank, ob für dieses Asset bereits ein Eintrag in `asset_metadata` mit dem Key `ionos_analysis` existiert.
+3.  **Analyse:** Falls neu, wird das Bild zur IONOS API gesendet.
+4.  **Speicherung:**
+    -   Volle JSON-Analyse -> `asset_metadata` (für Details).
+    -   Beschreibung & Tags -> `asset_exif` (für die Immich-Suche).
+
+## Troubleshooting
+
+-   **Fehler 401 (Unauthorized):** API-Key in `.env` prüfen.
+-   **Datenbank-Verbindung fehlgeschlagen:** Sicherstellen, dass der Postgres-Container Port 5432 freigibt (siehe `docker-compose.yml`).
