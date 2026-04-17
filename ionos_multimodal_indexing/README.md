@@ -74,6 +74,14 @@ Logs werden in `ionos_multimodal_indexing/logs/cron_run.log` gespeichert.
     -   Volle JSON-Analyse -> `asset_metadata` (für Details).
     -   Beschreibung & Tags -> `asset_exif` (für die Immich-Suche).
 
+## Kosten
+
+IONOS berechnet **1€ pro 1 Mio. Tokens** (Input + Output). Die tatsächlichen Kosten hängen von der Bildgröße ab, da Bilder als Base64 übertragen werden.
+
+**Geschätzte Kosten für 22.819 Bilder: ~35€**
+
+Das Modell analysiert jedes Bild und gibt strukturierte JSON-Metadaten zurück (Objekte, Personen, Szenen, Farben).
+
 ## Troubleshooting
 
 -   **Fehler 401 (Unauthorized):** API-Key in `.env` prüfen.
