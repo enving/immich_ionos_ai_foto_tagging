@@ -16,13 +16,27 @@ This repo provides a production-ready Immich (self-hosted Google Photos alternat
 ```bash
 # 1. Copy and edit environment
 cp .env.example .env
-# Edit .env with your settings
+# Edit .env with your settings (DB_PASSWORD, etc.)
 
-# 2. Start Immich
+# 2. Create required directories
+mkdir -p library/imported library/upload library/thumbs
+mkdir -p postgres
+
+# 3. Start Immich
 docker compose up -d
 
-# 3. Access at http://localhost:2283
+# 4. Access at http://localhost:2283
 ```
+
+## AI Coding Agent Setup Prompt
+
+Paste this into your agent after cloning:
+
+> "This is an Immich photo server setup with IONOS AI indexing. Do the following to make it runnable:
+> 1. Copy `.env.example` to `.env` and configure DB_PASSWORD and any other needed values
+> 2. Create the required directories: `mkdir -p library/imported library/upload library/thumbs postgres`
+> 3. Start with `docker compose up -d`
+> 4. Access at http://localhost:2283 and complete the admin setup in the UI"
 
 ## Environment Variables
 
