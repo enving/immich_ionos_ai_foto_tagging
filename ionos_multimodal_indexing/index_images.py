@@ -10,6 +10,7 @@ sendet sie an die IONOS-API und speichert die Ergebnisse in der Immich-Datenbank
 """
 
 import os
+import subprocess
 import requests
 import json
 import base64
@@ -62,56 +63,62 @@ def get_file_checksum(file_path):
         return None
 
 def get_asset_id_from_database(image_path):
-    """Finde die Asset-ID für ein Bild in der Immich-Datenbank mittels Dateipfad."""
     try:
-        conn = get_db_connection()
-        if not conn:
-            return None
-
-        cursor = conn.cursor()
-
-        # Konvertiere Host-Pfad zu Container-Pfad
-        # Host: /Users/macenving/immich-server/library/imported/... -> Container: /imported/...
         host_prefix = "/Users/macenving/immich-server/library/imported/"
         container_prefix = "/imported/"
-        
         str_path = str(image_path)
         if str_path.startswith(host_prefix):
             container_path = container_prefix + str_path[len(host_prefix):]
         else:
-            # Fallback: versuche den Pfad direkt
             container_path = str_path
 
-        query = sql.SQL("""
-            SELECT id FROM asset
-            WHERE "originalPath" = %s
-            LIMIT 1
-        """)
-
-        cursor.execute(query, (container_path,))
-        result = cursor.fetchone()
-
-        cursor.close()
-        conn.close()
-
-        return result[0] if result else None
+        cmd = ['docker', 'exec', 'immich_postgres', 'psql', '-U', 'postgres', '-d', 'immich', '-t', '-A', '-c', 
+               f'SELECT id FROM asset WHERE "originalPath" = \x27{container_path}\x27 LIMIT 1;']
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+        return None
     except Exception as e:
-        print(f"Fehler beim Abrufen der Asset-ID für {image_path}: {e}")
         return None
 
-def get_db_connection():
-    """Stellt eine Verbindung zur Immich-Datenbank her."""
+
+def db_check_if_exists(asset_id):
     try:
-        conn = psycopg2.connect(
-            dbname=DB_DATABASE_NAME,
-            user=DB_USERNAME,
-            password=DB_PASSWORD,
-            host="localhost",
+        cmd = ['docker', 'exec', 'immich_postgres', 'psql', '-U', 'postgres', '-d', 'immich', '-t', '-A', '-c',
+               f'SELECT 1 FROM asset_metadata WHERE "assetId" = \x27{asset_id}\x27 AND key = \x27ionos_analysis\x27 LIMIT 1;']
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        return result.returncode == 0 and bool(result.stdout.strip())
+    except:
+        return False
+
+
+def db_save_analysis(asset_id, analysis_json, description, tags):
+    try:
+        safe_json = analysis_json.replace("'", "''")
+        cmd = ['docker', 'exec', 'immich_postgres', 'psql', '-U', 'postgres', '-d', 'immich', '-c',
+               f"INSERT INTO asset_metadata (\"assetId\", key, value) VALUES (\x27{asset_id}\x27, \x27ionos_analysis\x27, \x27{safe_json}\x27) ON CONFLICT DO NOTHING;"]
+        subprocess.run(cmd, capture_output=True, timeout=10)
+
+        if description:
+            safe_desc = description[:500].replace("'", "''")
+            cmd2 = ['docker', 'exec', 'immich_postgres', 'psql', '-U', 'postgres', '-d', 'immich', '-c',
+                    f"UPDATE asset SET label = \x27{safe_desc}\x27 WHERE id = \x27{asset_id}\x27;"]
+            subprocess.run(cmd2, capture_output=True, timeout=10)
+        return True
+    except:
+        return False
+
+def get_db_connection():
+    try:
+        return psycopg2.connect(
+            dbname=DB_DATABASE_NAME or "immich",
+            user=DB_USERNAME or "postgres",
+            password=DB_PASSWORD or "immich",
+            host="127.0.0.1",
             port="5432"
         )
-        return conn
     except Exception as e:
-        print(f"Fehler bei der Datenbankverbindung: {e}")
+        print(f"Datenbankverbindungsfehler: {e}")
         return None
 
 def resize_image_for_api(image_path, max_size=(1024, 1024), quality=85):
@@ -439,6 +446,12 @@ def process_images():
                 asset_id = get_asset_id_from_database(image_path)
                 if not asset_id:
                      print(f"   ⏭️  Bild {j}/{len(batch)}: {os.path.basename(image_path)} - noch nicht in Immich (warte auf Import)")
+                     continue
+
+                # WICHTIGER KOSTENSCHUTZ: Prüfe harte DB-Tags (falls Tracker zurückgesetzt wurde)
+                if is_asset_indexed(asset_id):
+                     print(f"   ⏭️  Bild {j}/{len(batch)}: {os.path.basename(image_path)} - Bereits in Immich-DB getaggt (Kosten gespart!)")
+                     tracker.mark_successful(str(image_path), 0)
                      continue
 
                 # Sende das Bild an die IONOS-API
